@@ -7,7 +7,6 @@ const CATEGORY_IDS = [
     '1429462802317181059'
 ];
 
-// NOUVEAU : Définir la durée de vie des données (3 minutes en millisecondes)
 const DATA_EXPIRATION_MS = 3 * 60 * 1000;
 
 // On charge les secrets depuis les variables d'environnement
@@ -28,11 +27,17 @@ if (authorizedUserIds.size > 0) {
     console.warn("[ATTENTION] Aucun ID Roblox autorisé n'est configuré via AUTHORIZED_ROBLOX_IDS. L'endpoint /getdata échouera systématiquement.");
 }
 
-// MODIFIÉ : La file d'attente stockera maintenant { name, gen, timestamp }
 let dataQueue = []; 
 let lastProcessedEntry = {};
 let channelIdToName = {};
 let monitoredChannelIds = new Set();
+
+// Fonction pour nettoyer le markdown
+const cleanMarkdown = (text) => {
+    if (typeof text !== 'string') return text;
+    // Enlève les backticks triples (blocs de code) et simples (inline code)
+    return text.replace(/```/g, '').replace(/`/g, '');
+};
 
 // --- Configuration du Bot Discord ---
 const client = new Client({
@@ -81,33 +86,48 @@ client.on('messageCreate', async (message) => {
     const embed = message.embeds[0];
     if (!embed.fields || embed.fields.length === 0) return;
 
+    // Détection des champs
     const nameField = embed.fields.find(f => f.name.includes('Name'));
     const genField = embed.fields.find(f => f.name.includes('Generation'));
+    const jobField = embed.fields.find(f => f.name.includes('Job ID'));
 
+    // On vérifie seulement Name et Gen comme champs requis
     if (!nameField || !genField) {
         console.log(`[LOG] Embed reçu dans ${message.channel.name}, mais champs "Name" ou "Generation" manquants. Ignoré.`);
         return;
     }
 
-    const newName = nameField.value;
-    const newGen = genField.value;
+    // Nettoyage du markdown et gestion du Job ID (optionnel)
+    const newName = cleanMarkdown(nameField.value);
+    const newGen = cleanMarkdown(genField.value);
+    const newJobId = jobField ? cleanMarkdown(jobField.value) : null;
     const channelId = message.channel.id;
 
     const lastEntry = lastProcessedEntry[channelId];
 
-    if (lastEntry && lastEntry.name === newName && lastEntry.generation === newGen) {
-        console.log(`[DUPLICATE] Doublon détecté dans ${message.channel.name} (${newName}). Ignoré.`);
+    // MODIFIÉ : La détection de doublon ignore le 'jobId'
+    if (lastEntry && 
+        lastEntry.name === newName && 
+        lastEntry.generation === newGen) {
+        console.log(`[DUPLICATE] Doublon détecté (Name/Gen) dans ${message.channel.name} (${newName}). Ignoré.`);
         return;
     }
 
-    console.log(`[NEW] Nouvelle entrée valide dans ${message.channel.name}: ${newName} / ${newGen}`);
-    lastProcessedEntry[channelId] = { name: newName, generation: newGen };
+    console.log(`[NEW] Nouvelle entrée valide dans ${message.channel.name}: ${newName} / ${newGen} / Job: ${newJobId}`);
+    
+    // MODIFIÉ : On ne stocke que 'name' et 'gen' pour la détection de doublon
+    lastProcessedEntry[channelId] = { 
+        name: newName, 
+        generation: newGen
+        // On ne met PAS le jobId ici
+    };
 
-    // MODIFIÉ : On ajoute l'objet AVEC un timestamp
+    // On ajoute toujours l'objet complet (avec jobId) à la file d'attente
     dataQueue.push({
         name: newName,
         gen: newGen,
-        timestamp: Date.now() // Ajoute l'heure actuelle en ms
+        jobId: newJobId,
+        timestamp: Date.now() 
     });
     
     console.log(`[QUEUE] ${dataQueue.length} item(s) au total en mémoire.`);
@@ -120,7 +140,7 @@ app.get('/', (req, res) => {
     res.status(200).send('Serveur proxy actif et bot en ligne.');
 });
 
-// MODIFICATION DE LA ROUTE /getdata
+// ROUTE /getdata
 app.get('/getdata', (req, res) => {
     // 1. & 2. Vérification des paramètres
     const { key, userId } = req.query;
@@ -141,31 +161,28 @@ app.get('/getdata', (req, res) => {
         return res.status(403).json({ error: 'Accès non autorisé pour cet utilisateur.' });
     }
 
-    // 5. MODIFIÉ : Filtrer la liste au lieu de la vider
+    // 5. Filtrer la liste
     console.log(`[API] Requête valide reçue de l'UserID ${userId}.`);
 
-    // Calculer l'heure limite (tout ce qui est PLUS VIEUX que ça sera supprimé)
     const cutoffTime = Date.now() - DATA_EXPIRATION_MS;
 
-    // ÉTAPE 1 : Filtrer pour trouver les données "fraîches"
-    // On garde seulement les items dont le timestamp est SUPÉRIEUR à l'heure limite
+    // ÉTAPE 1 : Filtrer les données "fraîches"
     const freshData = dataQueue.filter(item => {
         return item.timestamp > cutoffTime;
     });
 
     console.log(`[API] ${dataQueue.length} items en mémoire... ${freshData.length} envoyés (< 3 min).`);
 
-    // ÉTAPE 2 : Préparer la réponse pour Roblox (sans les timestamps)
+    // ÉTAPE 2 : Préparer la réponse pour Roblox (avec jobId)
     const responseData = freshData.map(item => ({
         name: item.name,
-        gen: item.gen
+        gen: item.gen,
+        jobId: item.jobId
     }));
     
-    // On envoie seulement les données fraîches
     res.json(responseData);
 
-    // ÉTAPE 3 : Nettoyer la file d'attente principale en gardant SEULEMENT les données fraîches
-    // C'est ici qu'on "supprime" les vieilles données de la mémoire.
+    // ÉTAPE 3 : Nettoyer la file d'attente principale
     dataQueue = freshData;
 });
 
