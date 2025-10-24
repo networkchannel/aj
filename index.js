@@ -1,20 +1,19 @@
 import { Client, GatewayIntentBits, ChannelType } from 'discord.js';
 import express from 'express';
 
+// --- CONFIGURATION ---
 const CATEGORY_IDS = [
     '1429578588218200325',
     '1429462802317181059'
 ];
 
-// --- Variables d'Environnement ---
+// On charge les secrets depuis les variables d'environnement
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
-const API_SECRET_KEY = process.env.API_SECRET_KEY; // NOUVEAU: La clé pour ton API
+const API_SECRET_KEY = process.env.API_SECRET_KEY; 
 const PORT = process.env.PORT || 10000;
 
-// Structure: { channel_id: { name: "...", gen: "..." } }
-// C'est maintenant notre seule source de données.
+let latestEmbedData = {};
 let lastProcessedEntry = {};
-
 let channelIdToName = {};
 let monitoredChannelIds = new Set();
 
@@ -67,7 +66,6 @@ client.on('messageCreate', async (message) => {
     const embed = message.embeds[0];
     if (!embed.fields || embed.fields.length === 0) return;
 
-    // 2. Extraction dynamique des champs requis
     const nameField = embed.fields.find(f => f.name.includes('Name'));
     const genField = embed.fields.find(f => f.name.includes('Generation'));
 
@@ -77,58 +75,85 @@ client.on('messageCreate', async (message) => {
     }
 
     const newName = nameField.value;
-    const newGen = genField.value; // Renommé pour correspondre au format `gen`
+    const newGen = genField.value;
     const channelId = message.channel.id;
 
-    // 3. Vérification des doublons
     const lastEntry = lastProcessedEntry[channelId];
 
-    if (lastEntry && lastEntry.name === newName && lastEntry.gen === newGen) {
+    if (lastEntry && lastEntry.name === newName && lastEntry.generation === newGen) {
         console.log(`[DUPLICATE] Doublon détecté dans ${message.channel.name} (${newName}). Ignoré.`);
-        return;
+        return; 
     }
 
-    // 4. C'est une nouvelle entrée valide !
     console.log(`[NEW] Nouvelle entrée valide dans ${message.channel.name}: ${newName} / ${newGen}`);
 
-    // Mettre à jour le tracker de doublons (notre seule base de données)
-    // MODIFIÉ: utilise 'gen' pour correspondre à ton format
-    lastProcessedEntry[channelId] = { name: newName, gen: newGen };
+    lastProcessedEntry[channelId] = { name: newName, generation: newGen };
+
+    const allExtractedFields = embed.fields.map(field => ({
+        name: field.name,
+        value: field.value,
+        inline: field.inline
+    }));
+    
+    latestEmbedData[channelId] = allExtractedFields;
 });
 
-// --- Configuration du Serveur Web (Express) ---
+// --- Configuration du Serveur Web (MODIFIÉ) ---
 const app = express();
 
 app.get('/', (req, res) => {
-    // --- SÉCURITÉ ---
-    // On vérifie le header 'Authorization'
-    const authHeader = req.headers['authorization'];
-    const expectedAuth = `Bearer ${API_SECRET_KEY}`;
+    res.status(200).send('Serveur proxy actif et bot en ligne.');
+});
 
-    if (!API_SECRET_KEY || !authHeader || authHeader !== expectedAuth) {
-        console.warn(`[SECURITY] Tentative d'accès non autorisé.`);
-        return res.status(401).json({ error: 'Unauthorized' });
+app.get('/getdata', (req, res) => {
+    // 1. Récupérer l'en-tête d'autorisation
+    const authHeader = req.headers['authorization'];
+    
+    // 2. Extraire la clé (token)
+    let receivedKey = null;
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+        receivedKey = authHeader.split(' ')[1]; // Prend ce qui est après "Bearer "
+    }
+
+    // 3. Vérifier la clé
+    if (!receivedKey || receivedKey !== API_SECRET_KEY) {
+        console.warn(`[SECURITE] Echec de la requête. Token Bearer invalide ou manquant.`);
+        // 401 Unauthorized (Non autorisé - erreur de client)
+        return res.status(401).json({ error: 'Accès non autorisé. Token invalide.' });
+    }
+
+    // 4. Si la clé est valide, préparer et envoyer les données
+    console.log(`[API] Requête valide reçue. Envoi des données...`);
+    
+    const robloxDataList = [];
+
+    for (const [channelId, fields] of Object.entries(latestEmbedData)) {
+        
+        const nameField = fields.find(f => f.name.includes('Name'));
+        const genField = fields.find(f => f.name.includes('Generation'));
+
+        if (nameField && genField) {
+            robloxDataList.push({
+                name: nameField.value,
+                gen: genField.value
+            });
+        }
     }
     
-    // --- FORMATAGE DE LA RÉPONSE ---
-    // Transforme l'objet { "id": {name, gen}, ... } en array [ {name, gen}, ... ]
-    const responseArray = Object.values(lastProcessedEntry);
-    
-    res.json(responseArray);
+    res.json(robloxDataList);
 });
+
 
 // --- Démarrage ---
 if (!DISCORD_TOKEN) {
-    console.error("ERREUR CRITIQUE: 'DISCORD_TOKEN' n'est pas défini.");
-    process.exit(1);
-}
-if (!API_SECRET_KEY) {
-    console.warn("AVERTISSEMENT: 'API_SECRET_KEY' n'est pas définie. L'API n'est pas sécurisée !");
-}
+    console.error("ERREUR CRITIQUE: Le 'DISCORD_TOKEN' n'est pas défini dans les variables d'environnement.");
+} else if (!API_SECRET_KEY) {
+    console.error("ERREUR CRITIQUE: Le 'API_SECRET_KEY' n'est pas défini dans les variables d'environnement.");
+} else {
+    console.log("Tentative de connexion du bot à Discord...");
+    client.login(DISCORD_TOKEN);
 
-console.log("Tentative de connexion du bot à Discord...");
-client.login(DISCORD_TOKEN);
-
-app.listen(PORT, () => {
-    console.log(`Serveur web démarré et à l'écoute sur 0.0.0.0:${PORT}...`);
-});
+    app.listen(PORT, () => {
+        console.log(`Serveur web démarré et à l'écoute sur 0.0.0.0:${PORT}...`);
+    });
+}
