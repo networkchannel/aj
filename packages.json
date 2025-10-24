@@ -1,0 +1,16 @@
+{
+  "name": "aj",
+  "version": "1.0.0",
+  "description": "Kryos Hub on top lil skid trying to check my git bruhhhh",
+  "main": "index.js",
+  "type": "module",  
+  "scripts": {
+    "start": "node index.js"
+  },
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "discord.js": "^14.15.3",  
+    "express": "^4.19.2"    
+  }
+}
