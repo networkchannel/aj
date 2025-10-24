@@ -9,8 +9,24 @@ const CATEGORY_IDS = [
 
 // On charge les secrets depuis les variables d'environnement
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
-const API_SECRET_KEY = process.env.API_SECRET_KEY; 
+const API_SECRET_KEY = process.env.API_SECRET_KEY;
+// NOUVEAU: Charger la liste des IDs Roblox autorisés
+const AUTHORIZED_ROBLOX_IDS_STRING = process.env.AUTHORIZED_ROBLOX_IDS;
 const PORT = process.env.PORT || 10000;
+
+// NOUVEAU: Convertir la string en Set pour une vérification rapide (O(1))
+const authorizedUserIds = new Set(
+    AUTHORIZED_ROBLOX_IDS_STRING
+        ? AUTHORIZED_ROBLOX_IDS_STRING.split(',').map(id => id.trim())
+        : []
+);
+
+if (authorizedUserIds.size > 0) {
+    console.log(`[CONFIG] IDs Roblox autorisés chargés : ${[...authorizedUserIds].join(', ')}`);
+} else {
+    console.warn("[ATTENTION] Aucun ID Roblox autorisé n'est configuré via AUTHORIZED_ROBLOX_IDS. L'endpoint /getdata échouera systématiquement.");
+}
+
 
 let latestEmbedData = {};
 let lastProcessedEntry = {};
@@ -22,11 +38,11 @@ const client = new Client({
     intents: [
         GatewayIntentBits.Guilds,
         GatewayIntentBits.GuildMessages,
-        GatewayIntentBits.MessageContent 
+        GatewayIntentBits.MessageContent
     ]
 });
 
-client.once('clientReady', async () => { 
+client.once('clientReady', async () => {
     console.log(`--- Bot connecté en tant que ${client.user.tag} ---`);
 
     monitoredChannelIds.clear();
@@ -39,10 +55,10 @@ client.once('clientReady', async () => {
 
             if (category && category.type === ChannelType.GuildCategory) {
                 console.log(`  [Catégorie trouvée: ${category.name}]`);
-                
+
                 category.children.cache.forEach(channel => {
                     if (channel.type === ChannelType.GuildText) {
-                        console.log(`    -> Surveillance du salon : ${channel.name} (ID: ${channel.id})`);
+                        console.log(`     -> Surveillance du salon : ${channel.name} (ID: ${channel.id})`);
                         monitoredChannelIds.add(channel.id);
                         channelIdToName[channel.id] = channel.name;
                     }
@@ -82,7 +98,7 @@ client.on('messageCreate', async (message) => {
 
     if (lastEntry && lastEntry.name === newName && lastEntry.generation === newGen) {
         console.log(`[DUPLICATE] Doublon détecté dans ${message.channel.name} (${newName}). Ignoré.`);
-        return; 
+        return;
     }
 
     console.log(`[NEW] Nouvelle entrée valide dans ${message.channel.name}: ${newName} / ${newGen}`);
@@ -94,7 +110,7 @@ client.on('messageCreate', async (message) => {
         value: field.value,
         inline: field.inline
     }));
-    
+
     latestEmbedData[channelId] = allExtractedFields;
 });
 
@@ -105,30 +121,39 @@ app.get('/', (req, res) => {
     res.status(200).send('Serveur proxy actif et bot en ligne.');
 });
 
+// MODIFICATION DE LA ROUTE /getdata
 app.get('/getdata', (req, res) => {
-    // 1. Récupérer l'en-tête d'autorisation
-    const authHeader = req.headers['authorization'];
-    
-    // 2. Extraire la clé (token)
-    let receivedKey = null;
-    if (authHeader && authHeader.startsWith('Bearer ')) {
-        receivedKey = authHeader.split(' ')[1]; // Prend ce qui est après "Bearer "
+    // 1. Récupérer les paramètres de l'URL (query parameters)
+    const { key, userId } = req.query;
+
+    // 2. Vérifier si les paramètres sont présents
+    if (!key || !userId) {
+        console.warn(`[SECURITE] Requête échouée. Paramètres 'key' ou 'userId' manquants.`);
+        // 400 Bad Request (Requête incorrecte)
+        return res.status(400).json({ error: "Paramètres 'key' et 'userId' requis dans l'URL." });
     }
 
-    // 3. Vérifier la clé
-    if (!receivedKey || receivedKey !== API_SECRET_KEY) {
-        console.warn(`[SECURITE] Echec de la requête. Token Bearer invalide ou manquant.`);
-        // 401 Unauthorized (Non autorisé - erreur de client)
-        return res.status(401).json({ error: 'Accès non autorisé. Token invalide.' });
+    // 3. Vérifier la clé API
+    if (key !== API_SECRET_KEY) {
+        console.warn(`[SECURITE] Echec de la requête. Clé API invalide.`);
+        // 401 Unauthorized (Non authentifié)
+        return res.status(401).json({ error: 'Accès non authentifié. Clé invalide.' });
     }
 
-    // 4. Si la clé est valide, préparer et envoyer les données
-    console.log(`[API] Requête valide reçue. Envoi des données...`);
-    
+    // 4. Vérifier le UserID Roblox
+    if (!authorizedUserIds.has(userId)) {
+        console.warn(`[SECURITE] Echec de la requête. UserID Roblox non autorisé : ${userId}.`);
+        // 403 Forbidden (Authentifié, mais non autorisé à accéder)
+        return res.status(403).json({ error: 'Accès non autorisé pour cet utilisateur.' });
+    }
+
+    // 5. Si tout est valide, préparer et envoyer les données
+    console.log(`[API] Requête valide reçue de l'UserID ${userId}. Envoi des données...`);
+
     const robloxDataList = [];
 
     for (const [channelId, fields] of Object.entries(latestEmbedData)) {
-        
+
         const nameField = fields.find(f => f.name.includes('Name'));
         const genField = fields.find(f => f.name.includes('Generation'));
 
@@ -139,16 +164,18 @@ app.get('/getdata', (req, res) => {
             });
         }
     }
-    
+
     res.json(robloxDataList);
 });
 
 
-// --- Démarrage ---
+// --- Démarrage (Vérification ajoutée) ---
 if (!DISCORD_TOKEN) {
     console.error("ERREUR CRITIQUE: Le 'DISCORD_TOKEN' n'est pas défini dans les variables d'environnement.");
 } else if (!API_SECRET_KEY) {
     console.error("ERREUR CRITIQUE: Le 'API_SECRET_KEY' n'est pas défini dans les variables d'environnement.");
+} else if (!AUTHORIZED_ROBLOX_IDS_STRING) { // Ajout de la vérification
+    console.error("ERREUR CRITIQUE: 'AUTHORIZED_ROBLOX_IDS' n'est pas défini dans les variables d'environnement. (Ex: '123,456')");
 } else {
     console.log("Tentative de connexion du bot à Discord...");
     client.login(DISCORD_TOKEN);
