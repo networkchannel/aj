@@ -105,7 +105,7 @@ client.on('messageCreate', async (message) => {
 
     const lastEntry = lastProcessedEntry[channelId];
 
-    // MODIFIÉ : La détection de doublon ignore le 'jobId'
+    // La détection de doublon ignore le 'jobId'
     if (lastEntry && 
         lastEntry.name === newName && 
         lastEntry.generation === newGen) {
@@ -115,19 +115,18 @@ client.on('messageCreate', async (message) => {
 
     console.log(`[NEW] Nouvelle entrée valide dans ${message.channel.name}: ${newName} / ${newGen} / Job: ${newJobId}`);
     
-    // MODIFIÉ : On ne stocke que 'name' et 'gen' pour la détection de doublon
+    // On ne stocke que 'name' et 'gen' pour la détection de doublon
     lastProcessedEntry[channelId] = { 
         name: newName, 
         generation: newGen
-        // On ne met PAS le jobId ici
     };
 
-    // On ajoute toujours l'objet complet (avec jobId) à la file d'attente
+    // On ajoute l'objet complet à la file d'attente
     dataQueue.push({
         name: newName,
         gen: newGen,
         jobId: newJobId,
-        timestamp: Date.now() 
+        timestamp: Date.now() // Ajout du timestamp actuel
     });
     
     console.log(`[QUEUE] ${dataQueue.length} item(s) au total en mémoire.`);
@@ -167,22 +166,19 @@ app.get('/getdata', (req, res) => {
     const cutoffTime = Date.now() - DATA_EXPIRATION_MS;
 
     // ÉTAPE 1 : Filtrer les données "fraîches"
+    // On garde tous les items (avec le timestamp) qui sont plus récents que le cutoff
     const freshData = dataQueue.filter(item => {
         return item.timestamp > cutoffTime;
     });
 
     console.log(`[API] ${dataQueue.length} items en mémoire... ${freshData.length} envoyés (< 3 min).`);
 
-    // ÉTAPE 2 : Préparer la réponse pour Roblox (avec jobId)
-    const responseData = freshData.map(item => ({
-        name: item.name,
-        gen: item.gen,
-        jobId: item.jobId
-    }));
-    
-    res.json(responseData);
+    // ÉTAPE 2 : MODIFIÉ - Préparer la réponse pour Roblox
+    // On renvoie la liste filtrée telle quelle (elle contient name, gen, jobId, et timestamp)
+    // Pas besoin de .map() cette fois, 'freshData' a déjà le bon format.
+    res.json(freshData);
 
-    // ÉTAPE 3 : Nettoyer la file d'attente principale
+    // ÉTAPE 3 : Nettoyer la file d'attente principale en gardant SEULEMENT les données fraîches
     dataQueue = freshData;
 });
 
