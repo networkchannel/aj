@@ -7,14 +7,15 @@ const CATEGORY_IDS = [
     '1429462802317181059'
 ];
 
+// NOUVEAU : Définir la durée de vie des données (3 minutes en millisecondes)
+const DATA_EXPIRATION_MS = 3 * 60 * 1000;
+
 // On charge les secrets depuis les variables d'environnement
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
 const API_SECRET_KEY = process.env.API_SECRET_KEY;
-// NOUVEAU: Charger la liste des IDs Roblox autorisés
 const AUTHORIZED_ROBLOX_IDS_STRING = process.env.AUTHORIZED_ROBLOX_IDS;
 const PORT = process.env.PORT || 10000;
 
-// NOUVEAU: Convertir la string en Set pour une vérification rapide (O(1))
 const authorizedUserIds = new Set(
     AUTHORIZED_ROBLOX_IDS_STRING
         ? AUTHORIZED_ROBLOX_IDS_STRING.split(',').map(id => id.trim())
@@ -27,8 +28,8 @@ if (authorizedUserIds.size > 0) {
     console.warn("[ATTENTION] Aucun ID Roblox autorisé n'est configuré via AUTHORIZED_ROBLOX_IDS. L'endpoint /getdata échouera systématiquement.");
 }
 
-
-let latestEmbedData = {};
+// MODIFIÉ : La file d'attente stockera maintenant { name, gen, timestamp }
+let dataQueue = []; 
 let lastProcessedEntry = {};
 let channelIdToName = {};
 let monitoredChannelIds = new Set();
@@ -52,10 +53,8 @@ client.once('clientReady', async () => {
     for (const categoryId of CATEGORY_IDS) {
         try {
             const category = await client.channels.fetch(categoryId);
-
             if (category && category.type === ChannelType.GuildCategory) {
                 console.log(`  [Catégorie trouvée: ${category.name}]`);
-
                 category.children.cache.forEach(channel => {
                     if (channel.type === ChannelType.GuildText) {
                         console.log(`     -> Surveillance du salon : ${channel.name} (ID: ${channel.id})`);
@@ -102,19 +101,19 @@ client.on('messageCreate', async (message) => {
     }
 
     console.log(`[NEW] Nouvelle entrée valide dans ${message.channel.name}: ${newName} / ${newGen}`);
-
     lastProcessedEntry[channelId] = { name: newName, generation: newGen };
 
-    const allExtractedFields = embed.fields.map(field => ({
-        name: field.name,
-        value: field.value,
-        inline: field.inline
-    }));
-
-    latestEmbedData[channelId] = allExtractedFields;
+    // MODIFIÉ : On ajoute l'objet AVEC un timestamp
+    dataQueue.push({
+        name: newName,
+        gen: newGen,
+        timestamp: Date.now() // Ajoute l'heure actuelle en ms
+    });
+    
+    console.log(`[QUEUE] ${dataQueue.length} item(s) au total en mémoire.`);
 });
 
-// --- Configuration du Serveur Web (MODIFIÉ) ---
+// --- Configuration du Serveur Web ---
 const app = express();
 
 app.get('/', (req, res) => {
@@ -123,58 +122,60 @@ app.get('/', (req, res) => {
 
 // MODIFICATION DE LA ROUTE /getdata
 app.get('/getdata', (req, res) => {
-    // 1. Récupérer les paramètres de l'URL (query parameters)
+    // 1. & 2. Vérification des paramètres
     const { key, userId } = req.query;
-
-    // 2. Vérifier si les paramètres sont présents
     if (!key || !userId) {
         console.warn(`[SECURITE] Requête échouée. Paramètres 'key' ou 'userId' manquants.`);
-        // 400 Bad Request (Requête incorrecte)
         return res.status(400).json({ error: "Paramètres 'key' et 'userId' requis dans l'URL." });
     }
 
-    // 3. Vérifier la clé API
+    // 3. Vérification de la clé API
     if (key !== API_SECRET_KEY) {
         console.warn(`[SECURITE] Echec de la requête. Clé API invalide.`);
-        // 401 Unauthorized (Non authentifié)
         return res.status(401).json({ error: 'Accès non authentifié. Clé invalide.' });
     }
 
-    // 4. Vérifier le UserID Roblox
+    // 4. Vérification du UserID Roblox
     if (!authorizedUserIds.has(userId)) {
         console.warn(`[SECURITE] Echec de la requête. UserID Roblox non autorisé : ${userId}.`);
-        // 403 Forbidden (Authentifié, mais non autorisé à accéder)
         return res.status(403).json({ error: 'Accès non autorisé pour cet utilisateur.' });
     }
 
-    // 5. Si tout est valide, préparer et envoyer les données
-    console.log(`[API] Requête valide reçue de l'UserID ${userId}. Envoi des données...`);
+    // 5. MODIFIÉ : Filtrer la liste au lieu de la vider
+    console.log(`[API] Requête valide reçue de l'UserID ${userId}.`);
 
-    const robloxDataList = [];
+    // Calculer l'heure limite (tout ce qui est PLUS VIEUX que ça sera supprimé)
+    const cutoffTime = Date.now() - DATA_EXPIRATION_MS;
 
-    for (const [channelId, fields] of Object.entries(latestEmbedData)) {
+    // ÉTAPE 1 : Filtrer pour trouver les données "fraîches"
+    // On garde seulement les items dont le timestamp est SUPÉRIEUR à l'heure limite
+    const freshData = dataQueue.filter(item => {
+        return item.timestamp > cutoffTime;
+    });
 
-        const nameField = fields.find(f => f.name.includes('Name'));
-        const genField = fields.find(f => f.name.includes('Generation'));
+    console.log(`[API] ${dataQueue.length} items en mémoire... ${freshData.length} envoyés (< 3 min).`);
 
-        if (nameField && genField) {
-            robloxDataList.push({
-                name: nameField.value,
-                gen: genField.value
-            });
-        }
-    }
+    // ÉTAPE 2 : Préparer la réponse pour Roblox (sans les timestamps)
+    const responseData = freshData.map(item => ({
+        name: item.name,
+        gen: item.gen
+    }));
+    
+    // On envoie seulement les données fraîches
+    res.json(responseData);
 
-    res.json(robloxDataList);
+    // ÉTAPE 3 : Nettoyer la file d'attente principale en gardant SEULEMENT les données fraîches
+    // C'est ici qu'on "supprime" les vieilles données de la mémoire.
+    dataQueue = freshData;
 });
 
 
-// --- Démarrage (Vérification ajoutée) ---
+// --- Démarrage ---
 if (!DISCORD_TOKEN) {
     console.error("ERREUR CRITIQUE: Le 'DISCORD_TOKEN' n'est pas défini dans les variables d'environnement.");
 } else if (!API_SECRET_KEY) {
     console.error("ERREUR CRITIQUE: Le 'API_SECRET_KEY' n'est pas défini dans les variables d'environnement.");
-} else if (!AUTHORIZED_ROBLOX_IDS_STRING) { // Ajout de la vérification
+} else if (!AUTHORIZED_ROBLOX_IDS_STRING) {
     console.error("ERREUR CRITIQUE: 'AUTHORIZED_ROBLOX_IDS' n'est pas défini dans les variables d'environnement. (Ex: '123,456')");
 } else {
     console.log("Tentative de connexion du bot à Discord...");
